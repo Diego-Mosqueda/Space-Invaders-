@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Space Invaders Clásico - Mejorado</title>
+    <!-- Incluimos Tailwind CSS para un estilo base moderno y responsivo -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Importaciones de Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, limit, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Establecer el nivel de registro para depuración (opcional)
+        // setLogLevel('debug'); 
+
+        // Variables globales (definidas en el entorno de Canvas)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'space-invaders-default';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId;
+
+        // Función de inicialización asíncrona de Firebase
+        async function initializeFirebase() {
+            if (!firebaseConfig) {
+                console.error("Configuración de Firebase no encontrada.");
+                return;
+            }
+
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
+                // Una vez autenticado, obtenemos el UID del usuario.
+                userId = auth.currentUser.uid;
+                window.firebaseReady = true; // Señalamos que Firebase está listo
+                window.db = db; // Hacemos la instancia de db accesible globalmente
+
+                console.log("Firebase inicializado y usuario autenticado:", userId);
+                document.getElementById('user-id-display').textContent = userId;
+                
+                // Iniciar la escucha de puntuaciones altas
+                listenForHighScores(db, appId);
+
+            } catch (error) {
+                console.error("Error al autenticar o inicializar Firebase:", error);
+                // Si la autenticación falla, usamos un ID de usuario anónimo para el almacenamiento local.
+                userId = crypto.randomUUID();
+                document.getElementById('user-id-display').textContent = 'Anónimo - ' + userId.substring(0, 8) + '...';
+            }
+        }
+
+        // Función para escuchar puntuaciones altas
+        function listenForHighScores(dbInstance, appId) {
+            if (!dbInstance) return;
+
+            // Ruta de la colección: /artifacts/{appId}/public/data/highScores
+            const scoresCollectionPath = `artifacts/${appId}/public/data/highScores`;
+            const scoresRef = collection(dbInstance, scoresCollectionPath);
+            
+            // Consulta para obtener el top 5, ordenado descendentemente
+            const q = query(scoresRef, orderBy("score", "desc"), limit(5));
+
+            onSnapshot(q, (snapshot) => {
+                const highScores = [];
+                snapshot.forEach((doc) => {
+                    highScores.push(doc.data());
+                });
+                // Actualizar la UI del juego
+                window.updateHighScoresUI(highScores);
+            }, (error) => {
+                console.error("Error al escuchar las puntuaciones altas:", error);
+            });
+        }
+
+        // Función para guardar la puntuación (accesible desde la lógica del juego)
+        window.saveHighScore = async (score) => {
+            if (!db || !userId) {
+                console.warn("Firebase no está listo para guardar la puntuación.");
+                return;
+            }
+            if (score <= 0) return;
+
+            // Ruta de la colección: /artifacts/{appId}/public/data/highScores
+            const scoresCollectionPath = `artifacts/${appId}/public/data/highScores`;
+            
+            try {
+                await addDoc(collection(db, scoresCollectionPath), {
+                    userId: userId,
+                    score: score,
+                    timestamp: new Date().toISOString()
+                });
+                console.log("Puntuación guardada exitosamente:", score);
+            } catch (e) {
+                console.error("Error al añadir el documento de puntuación: ", e);
+            }
+        };
+
+        initializeFirebase();
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+        
+        /* Estilo de la fuente retro */
+        .pixel-font {
+            font-family: 'Press Start 2P', cursive;
+            text-shadow: 2px 2px #000;
+        }
+
+        /* Contenedor principal para centrar */
+        .game-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: #1a1a2e; /* Fondo oscuro espacial */
+        }
+
+        /* Estilo del Canvas */
+        #gameCanvas {
+            border: 4px solid #00f080; /* Borde verde neón */
+            background-color: #000000;
+            display: block;
+            box-shadow: 0 0 20px #00f080; /* Sombra neón */
+            max-width: 90vw;
+            max-height: 90vh;
+            aspect-ratio: 4/3; /* Proporción clásica de arcade */
+            width: 100%;
+            height: auto;
+        }
+
+        /* Estilo de los botones */
+        .game-button {
+            transition: all 0.2s;
+            transform: translateY(0);
+        }
+        .game-button:hover {
+            box-shadow: 0 0 10px #00f080, 0 0 20px #00f080;
+            transform: translateY(-2px);
+        }
+        .game-button:active {
+            box-shadow: 0 0 5px #00f080;
+            transform: translateY(1px);
+        }
+
+        /* Estilos para el panel de control y puntuación */
+        .info-panel {
+            background-color: rgba(33, 37, 41, 0.9);
+            border: 2px solid #00f080;
+            box-shadow: 0 0 15px rgba(0, 240, 128, 0.7);
+            color: #00f080;
+        }
+    </style>
+</head>
+<body class="game-container">
+
+    <div class="flex flex-col lg:flex-row p-4 gap-6 w-full max-w-7xl">
+        
+        <!-- Panel de Información Lateral / Puntuación Alta -->
+        <div class="lg:w-1/4 info-panel p-4 rounded-xl flex flex-col space-y-4 pixel-font text-sm">
+            <h2 class="text-xl text-center mb-2 uppercase border-b border-green-500 pb-2 text-white">Estado del Juego</h2>
+            <div id="stats-panel" class="space-y-2">
+                <p>Puntuación: <span id="score">0</span></p>
+                <p>Dificultad: <span id="difficulty-display">NORMAL</span></p>
+                <p>Nivel: <span id="level">1</span></p>
+                <p>Vidas: <span id="lives">3</span></p>
+                <!-- Nuevo campo para el arma actual -->
+                <p>ARMA: <span id="weapon-display" class="text-yellow-400">RÁPIDA</span></p> 
+                <p>Usuario ID: <span id="user-id-display" class="break-all text-xs">...cargando...</span></p>
+            </div>
+            
+            <h3 class="text-xl text-center mt-4 mb-2 uppercase border-b border-green-500 pb-2 text-white">Mejores Puntuaciones</h3>
+            <ul id="high-scores-list" class="space-y-1 text-xs">
+                <li class="text-gray-400">Cargando...</li>
+            </ul>
+
+            <h3 class="text-xl text-center mt-4 mb-2 uppercase border-b border-green-500 pb-2 text-white">Premios Desbloqueados</h3>
+            <ul id="prizes-list" class="space-y-1 text-xs text-yellow-300">
+                <li class="text-gray-400">Ninguno aún.</li>
+            </ul>
+
+            <h3 class="text-xl text-center mt-4 mb-2 uppercase border-b border-green-500 pb-2 text-white">Controles</h3>
+            <ul class="text-xs space-y-1">
+                <li><span class="text-yellow-400">A / ←</span>: Mover Izquierda</li>
+                <li><span class="text-yellow-400">D / →</span>: Mover Derecha</li>
+                <li><span class="text-yellow-400">P</span>: Pausa/Continuar</li>
+                <!-- Se elimina el control de disparo ya que es automático -->
+            </ul>
+        </div>
+        
+        <!-- Área Central del Juego -->
+        <div class="lg:w-3/4 flex flex-col items-center">
+            <!-- Canvas del Juego -->
+            <canvas id="gameCanvas" width="800" height="600"></canvas>
+            
+            <!-- Modal de Inicio/Pausa/Fin -->
+            <div id="game-modal" class="absolute inset-0 bg-black bg-opacity-70 flex justify-center items-center z-10 hidden">
+                <div class="bg-gray-800 p-8 rounded-xl border-4 border-yellow-400 text-center pixel-font max-w-sm w-full">
+                    <h1 id="modal-title" class="text-3xl text-red-500 mb-4">Space Invaders</h1>
+                    <p id="modal-message" class="text-white text-sm mb-6">Selecciona una dificultad para comenzar tu misión:</p>
+                    
+                    <!-- Botones de Selección de Dificultad (Inicialmente visibles) -->
+                    <div id="difficulty-selection" class="space-y-4">
+                        <button id="easy-button" class="game-button bg-green-600 hover:bg-green-700 text-white py-2 px-6 rounded text-lg w-full">FÁCIL</button>
+                        <button id="medium-button" class="game-button bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-6 rounded text-lg w-full">NORMAL</button>
+                        <button id="hard-button" class="game-button bg-red-600 hover:bg-red-700 text-white py-2 px-6 rounded text-lg w-full">DIFÍCIL</button>
+                    </div>
+
+                    <!-- Botón de Continuar (Solo para Pausa/Game Over) -->
+                    <div id="pause-continue-button" class="hidden">
+                         <button id="start-button" class="game-button bg-green-600 hover:bg-green-700 text-white py-2 px-6 rounded text-lg">
+                            START
+                        </button>
+                    </div>
+
+                    <div id="game-over-details" class="hidden mt-4 text-left text-xs text-white">
+                        <p>Puntuación Final: <span id="final-score">0</span></p>
+                        <p>Mejor Puntuación Personal: <span id="personal-high-score">N/A</span></p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Botones de Control (para móviles/dispositivos táctiles) -->
+            <div class="flex justify-around w-full mt-4 max-w-lg">
+                <button id="move-left" class="game-button bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-full text-2xl w-16 h-16">&#x25C0;</button>
+                <button id="move-right" class="game-button bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-full text-2xl w-16 h-16">&#x25B6;</button>
+            </div>
+            <!-- Se elimina el botón de disparo ya que es automático -->
+        </div>
+    </div>
+    
+    <script>
+        // =========================================================================
+        // Configuración y Variables Globales del Juego
+        // =========================================================================
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        let animationFrameId;
+
+        // ** CONSTANTE CLAVE: Nivel máximo para la victoria **
+        const MAX_LEVEL = 3; 
+
+        // Definiciones de Dificultad
+        const DIFFICULTIES = {
+            EASY: { lives: 5, multiplier: 0.8, name: 'FÁCIL' },
+            MEDIUM: { lives: 3, multiplier: 1.0, name: 'NORMAL' },
+            HARD: { lives: 1, multiplier: 1.5, name: 'DIFÍCIL' }
+        };
+        let selectedDifficulty = DIFFICULTIES.MEDIUM; // Dificultad por defecto
+
+        // Definiciones de Premios/Recompensas
+        const REWARDS = {
+            'EASY_LEVEL1': { id: 'easy_l1', name: 'Medalla de Bronce (Nivel 1 Fácil)', condition: (level, difficultyName) => level === 1 && difficultyName === DIFFICULTIES.EASY.name },
+            'MEDIUM_LEVEL2': { id: 'medium_l2', name: 'Insignia de Plata (Nivel 2 Normal)', condition: (level, difficultyName) => level === 2 && difficultyName === DIFFICULTIES.MEDIUM.name },
+            'HARD_LEVEL1': { id: 'hard_l1', name: 'Estrella de Oro (Nivel 1 Difícil)', condition: (level, difficultyName) => level === 1 && difficultyName === DIFFICULTIES.HARD.name }
+        };
+
+        // Tipos de Armas
+        const WEAPONS = {
+            RAPID: { name: 'RÁPIDA', type: 'RAPID', cooldown: 100, color: '#ffff00' }, // 100ms: muy rápida
+            TRIPLE: { name: 'TRIPLE', type: 'TRIPLE', cooldown: 300, color: '#00ccff' } // 300ms: más lenta pero triple
+        };
+        
+        let gameState = {
+            score: 0,
+            lives: 3,
+            level: 1,
+            isPaused: true,
+            isGameOver: true,
+            isLevelComplete: false,
+            isGameWon: false, // Nuevo estado para la victoria
+            difficultyMultiplier: 1.0,
+            currentDifficultyName: DIFFICULTIES.MEDIUM.name, 
+            prizes: new Set(), 
+            lastScore: 0,
+            personalHighScore: 0,
+            currentWeapon: WEAPONS.RAPID, // Arma inicial
+        };
+
+        let player, playerBullets = [];
+        let enemies = [];
+        let enemyBullets = [];
+        let explosions = [];
+        let keys = {}; // Estado de las teclas presionadas
+        let lastShootTime = 0;
+        
+        // ** VALOR CLAVE: Velocidad de las balas enemigas muy baja **
+        const ENEMY_BULLET_SLOW_SPEED = 1.0; 
+        // ** VALOR CLAVE: Probabilidad de obtener arma tras destruir enemigo **
+        const WEAPON_DROP_CHANCE = 0.5; // 50% de probabilidad
+
+        // Estilización de la IU
+        const scoreElement = document.getElementById('score');
+        const difficultyDisplay = document.getElementById('difficulty-display'); 
+        const levelElement = document.getElementById('level');
+        const livesElement = document.getElementById('lives');
+        const weaponDisplay = document.getElementById('weapon-display'); // Nuevo para el arma
+        const modal = document.getElementById('game-modal');
+        const modalTitle = document.getElementById('modal-title');
+        const modalMessage = document.getElementById('modal-message');
+        const startButton = document.getElementById('start-button');
+        const gameOverDetails = document.getElementById('game-over-details');
+        const finalScoreDisplay = document.getElementById('final-score');
+        const personalHighScoreDisplay = document.getElementById('personal-high-score');
+        const highScoresList = document.getElementById('high-scores-list');
+        const prizesList = document.getElementById('prizes-list'); 
+        
+        const difficultySelection = document.getElementById('difficulty-selection'); 
+        const pauseContinueButton = document.getElementById('pause-continue-button'); 
+        const easyButton = document.getElementById('easy-button'); 
+        const mediumButton = document.getElementById('medium-button'); 
+        const hardButton = document.getElementById('hard-button'); 
+
+
+        // =========================================================================
+        // Funciones de Puntuación y UI
+        // =========================================================================
+
+        // Función para actualizar la UI del juego (Score, Lives, Level, Difficulty, Prizes, Weapon)
+        function updateGameUI() {
+            scoreElement.textContent = gameState.score;
+            difficultyDisplay.textContent = gameState.currentDifficultyName;
+            levelElement.textContent = gameState.level;
+            livesElement.textContent = gameState.lives;
+            weaponDisplay.textContent = gameState.currentWeapon.name; // Actualiza el arma
+            // Esta parte del estilo directo puede no funcionar bien en JS. Mejor usar clases predefinidas si es posible
+            // weaponDisplay.className = `text-[${gameState.currentWeapon.color}]`; 
+
+            // Actualizar lista de Premios
+            prizesList.innerHTML = '';
+            if (gameState.prizes.size === 0) {
+                prizesList.innerHTML = '<li class="text-gray-400">Ninguno aún.</li>';
+            } else {
+                gameState.prizes.forEach(prizeId => {
+                    const prize = Object.values(REWARDS).find(r => r.id === prizeId);
+                    const li = document.createElement('li');
+                    li.textContent = `⭐ ${prize.name}`;
+                    prizesList.appendChild(li);
+                });
+            }
+        }
+
+        // Función global llamada por el listener de Firestore
+        window.updateHighScoresUI = (scores) => {
+            highScoresList.innerHTML = '';
+            if (scores.length === 0) {
+                highScoresList.innerHTML = '<li class="text-center text-gray-400">Sé el primero en anotar!</li>';
+                return;
+            }
+            
+            // Determinar la puntuación más alta personal
+            const currentUserId = document.getElementById('user-id-display').textContent;
+            const personalScoreEntry = scores.find(s => s.userId === currentUserId);
+            // Asegurarse de que personalHighScore se actualice correctamente
+            gameState.personalHighScore = personalScoreEntry ? personalScoreEntry.score : (gameState.personalHighScore || 0);
+            
+            personalHighScoreDisplay.textContent = gameState.personalHighScore > 0 ? gameState.personalHighScore : 'N/A';
+            
+            scores.forEach((s, index) => {
+                const li = document.createElement('li');
+                // Mostrar solo los primeros 8 caracteres del userId
+                const displayUserId = s.userId.length > 8 ? s.userId.substring(0, 8) + '...' : s.userId; 
+                const rank = index + 1;
+                let rankClass = 'text-white';
+                if (rank === 1) rankClass = 'text-yellow-400';
+                else if (rank === 2) rankClass = 'text-gray-400';
+                else if (rank === 3) rankClass = 'text-orange-300';
+
+                li.className = `${rankClass} flex justify-between`;
+                li.innerHTML = `<span>#${rank}: ${s.score}</span> <span>(${displayUserId})</span>`;
+                highScoresList.appendChild(li);
+            });
+        };
+
+        // Mostrar el menú de inicio/selección de dificultad
+        function showMenu() {
+            modalTitle.textContent = "Space Invaders";
+            modalMessage.textContent = "Selecciona una dificultad para comenzar tu misión:";
+
+            // Mostrar el selector de dificultad y ocultar el botón de continuar/start
+            difficultySelection.classList.remove('hidden');
+            pauseContinueButton.classList.add('hidden');
+            gameOverDetails.classList.add('hidden');
+
+            modal.classList.remove('hidden');
+            cancelAnimationFrame(animationFrameId); // Pausa el loop de juego
+        }
+
+        // Mostrar un modal genérico (Pausa/Game Over/Nivel Completado/Win)
+        function showModal(title, message, isGameOverOrWon = false, showDetails = false) {
+            modalTitle.textContent = title;
+            modalMessage.textContent = message;
+
+            // Ocultar el selector de dificultad y mostrar el botón de continuar/start
+            difficultySelection.classList.add('hidden');
+            pauseContinueButton.classList.remove('hidden');
+            
+            startButton.textContent = isGameOverOrWon ? "JUGAR DE NUEVO" : "CONTINUAR";
+            // Al ganar o perder, el botón debe regresar al menú principal
+            startButton.onclick = isGameOverOrWon ? showMenu : unpauseGame; 
+
+            if (showDetails) {
+                finalScoreDisplay.textContent = gameState.lastScore;
+                personalHighScoreDisplay.textContent = gameState.personalHighScore > 0 ? gameState.personalHighScore : 'N/A';
+                gameOverDetails.classList.remove('hidden');
+            } else {
+                gameOverDetails.classList.add('hidden');
+            }
+
+            modal.classList.remove('hidden');
+            cancelAnimationFrame(animationFrameId); // Pausa el loop de juego
+        }
+        
+        // Ocultar el modal
+        function hideModal() {
+            modal.classList.add('hidden');
+        }
+
+        // =========================================================================
+        // Clases de Entidades del Juego
+        // =========================================================================
+
+        // Clase Base para los proyectiles
+        class Bullet {
+            constructor(x, y, color, speed) {
+                this.x = x;
+                this.y = y;
+                this.width = 3;
+                this.height = 10;
+                this.color = color;
+                this.speed = speed;
+            }
+
+            update() {
+                this.y += this.speed;
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+            }
+        }
+
+        // Clase Jugador
+        class Player {
+            constructor() {
+                this.width = 40;
+                this.height = 20;
+                this.x = (canvas.width / 2) - (this.width / 2);
+                this.y = canvas.height - 40;
+                this.speed = 4;
+                this.color = '#00f080'; // Verde neón
+                this.canShoot = true; // No se usa por el disparo automático, pero se mantiene
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                // Dibujo de la nave del jugador (simple triángulo y base)
+                ctx.beginPath();
+                ctx.moveTo(this.x + this.width / 2, this.y); // Punta superior
+                ctx.lineTo(this.x, this.y + this.height); // Esquina inferior izquierda
+                ctx.lineTo(this.x + this.width, this.y + this.height); // Esquina inferior derecha
+                ctx.closePath();
+                ctx.fill();
+                ctx.fillRect(this.x + 5, this.y + this.height - 5, this.width - 10, 5); // Base
+            }
+
+            move() {
+                if ((keys['ArrowLeft'] || keys['a']) && this.x > 0) {
+                    this.x -= this.speed;
+                }
+                if ((keys['ArrowRight'] || keys['d']) && this.x < canvas.width - this.width) {
+                    this.x += this.speed;
+                }
+            }
+
+            // Lógica de disparo con diferentes tipos de arma
+            shoot() {
+                const currentTime = Date.now();
+                const cooldown = gameState.currentWeapon.cooldown;
+                
+                if (currentTime - lastShootTime < cooldown) {
+                    return; // Esperar al cooldown
+                }
+
+                if (gameState.currentWeapon.type === 'RAPID') {
+                    // Disparo Rápido (normal)
+                    const bullet = new Bullet(this.x + this.width / 2 - 1.5, this.y, gameState.currentWeapon.color, -5);
+                    playerBullets.push(bullet);
+
+                } else if (gameState.currentWeapon.type === 'TRIPLE') {
+                    // Disparo Triple
+                    const centerBullet = new Bullet(this.x + this.width / 2 - 1.5, this.y, gameState.currentWeapon.color, -5);
+                    const leftBullet = new Bullet(this.x + 5, this.y, gameState.currentWeapon.color, -5);
+                    const rightBullet = new Bullet(this.x + this.width - 8, this.y, gameState.currentWeapon.color, -5);
+                    
+                    playerBullets.push(centerBullet, leftBullet, rightBullet);
+                }
+
+                lastShootTime = currentTime;
+            }
+        }
+
+        // Clase Enemigo
+        class Enemy {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.width = 30;
+                this.height = 20;
+                this.type = type; 
+                this.value = 10;
+                this.color = '#ff0066'; // Rojo/Rosa
+                this.speedX = 0; 
+                this.speedY = 0; 
+                this.canShoot = true;
+                // La probabilidad de disparo es escalable con la dificultad
+                this.shootChance = 0.001 * gameState.difficultyMultiplier; 
+                this.lastMoveTime = 0;
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                // Dibujo de un enemigo simple (cuerpo y "ojos")
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(this.x + 5, this.y + 5, 5, 5);
+                ctx.fillRect(this.x + this.width - 10, this.y + 5, 5, 5);
+            }
+
+            update() {
+                // El movimiento se maneja en la función principal del juego para la formación
+            }
+
+            // Un enemigo dispara hacia abajo
+            tryShoot() {
+                if (Math.random() < this.shootChance) {
+                    // ** NOTA CLAVE: Velocidad de bala de enemigo lenta **
+                    const speed = ENEMY_BULLET_SLOW_SPEED + (0.5 * gameState.difficultyMultiplier); // Escala un poco con dificultad
+                    const bullet = new Bullet(this.x + this.width / 2 - 1.5, this.y + this.height, '#ff9900', speed);
+                    enemyBullets.push(bullet);
+                }
+            }
+        }
+        
+        // Clase para las explosiones (efecto visual)
+        class Explosion {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.radius = 2;
+                this.maxRadius = 15;
+                this.life = 0; // Contador de vida
+                this.maxLife = 20; // Duración en frames
+            }
+
+            update() {
+                this.life++;
+                this.radius = this.maxRadius * (this.life / this.maxLife);
+            }
+
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = 1 - (this.life / this.maxLife); // Desvanecimiento
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // =========================================================================
+        // Lógica de Armas y Niveles
+        // =========================================================================
+        
+        const ENEMY_ROWS = 5;
+        const ENEMIES_PER_ROW = 10;
+        const ENEMY_SPACING_X = 50;
+        const ENEMY_SPACING_Y = 35;
+        const ENEMY_START_Y = 50;
+        let enemyDirection = 1; // 1 = derecha, -1 = izquierda
+        const ENEMY_MOVE_TIME = 800; // Milisegundos entre movimientos horizontales
+        let lastEnemyMoveTime = 0;
+
+        function initializeEnemies(level) {
+            enemies = [];
+            
+            // Aplicar el multiplicador de dificultad basado en el nivel y la dificultad elegida
+            gameState.difficultyMultiplier = selectedDifficulty.multiplier + (level * 0.1);
+            
+            for (let row = 0; row < ENEMY_ROWS; row++) {
+                for (let col = 0; col < ENEMIES_PER_ROW; col++) {
+                    const x = 50 + col * ENEMY_SPACING_X;
+                    const y = ENEMY_START_Y + row * ENEMY_SPACING_Y;
+                    enemies.push(new Enemy(x, y, 1));
+                }
+            }
+            enemyDirection = 1;
+            lastEnemyMoveTime = 0;
+            enemyBullets = []; // Limpiar balas de enemigos anteriores
+        }
+
+        function moveEnemies() {
+            const currentTime = Date.now();
+            if (currentTime - lastEnemyMoveTime < ENEMY_MOVE_TIME / gameState.difficultyMultiplier) {
+                return; // Esperar al siguiente tiempo de movimiento
+            }
+            lastEnemyMoveTime = currentTime;
+
+            let shouldDrop = false;
+            let moveAmountX = 15 * gameState.difficultyMultiplier;
+            let moveAmountY = 20;
+
+            // 1. Determinar si la formación ha alcanzado el borde
+            const minX = Math.min(...enemies.map(e => e.x));
+            const maxX = Math.max(...enemies.map(e => e.x + e.width));
+
+            if (enemyDirection === 1 && maxX + moveAmountX > canvas.width) {
+                shouldDrop = true;
+            } else if (enemyDirection === -1 && minX - moveAmountX < 0) {
+                shouldDrop = true;
+            }
+
+            // 2. Aplicar movimiento
+            enemies.forEach(enemy => {
+                if (shouldDrop) {
+                    enemy.y += moveAmountY; // Bajar
+                    enemyDirection *= -1; // Cambiar dirección horizontal
+                } else {
+                    enemy.x += enemyDirection * moveAmountX; // Mover horizontalmente
+                }
+                
+                // 3. Revisar si algún enemigo ha cruzado el límite de derrota
+                if (enemy.y + enemy.height > player.y - 10) {
+                    gameOver(true); // El jugador pierde automáticamente si invaden la base
+                }
+            });
+        }
+        
+        // Función para cambiar de arma de forma aleatoria (excluyendo la actual)
+        function changeWeapon() {
+            if (Math.random() < WEAPON_DROP_CHANCE) {
+                const availableWeapons = Object.values(WEAPONS).filter(w => w.type !== gameState.currentWeapon.type);
+                if (availableWeapons.length > 0) {
+                    // Selecciona un arma diferente al azar
+                    const newWeapon = availableWeapons[Math.floor(Math.random() * availableWeapons.length)];
+                    gameState.currentWeapon = newWeapon;
+                    updateGameUI();
+                    console.log("¡Arma cambiada a:", newWeapon.name);
+                }
+            }
+        }
+
+        // =========================================================================
+        // Lógica Principal del Juego
+        // =========================================================================
+
+        // Función para verificar colisiones AABB (Axis-Aligned Bounding Box)
+        function checkCollision(objA, objB) {
+            return objA.x < objB.x + objB.width &&
+                   objA.x + objA.width > objB.x &&
+                   objA.y < objB.y + objB.height &&
+                   objA.y + objA.height > objB.y;
+        }
+
+        // Función de inicialización/reinicio con dificultad
+        function resetGame(difficulty) {
+            gameState.score = 0;
+            gameState.lives = difficulty.lives;
+            gameState.level = 1;
+            gameState.isGameOver = false;
+            gameState.isGameWon = false; // Resetear estado de victoria
+            gameState.lastScore = 0;
+            gameState.difficultyMultiplier = difficulty.multiplier;
+            gameState.currentDifficultyName = difficulty.name;
+            gameState.currentWeapon = WEAPONS.RAPID; // Reiniciar al arma base
+
+            player = new Player();
+            playerBullets = [];
+            enemyBullets = [];
+            explosions = [];
+
+            initializeEnemies(gameState.level);
+            updateGameUI();
+        }
+
+        // Función para seleccionar dificultad y comenzar el juego
+        function selectDifficulty(difficulty) {
+            selectedDifficulty = difficulty;
+            startGame();
+        }
+
+        // Función para comenzar el juego
+        function startGame() {
+            hideModal();
+            resetGame(selectedDifficulty);
+            gameState.isPaused = false;
+            gameLoop();
+        }
+
+        // Manejar el final del juego (Derrota)
+        function gameOver(invaded = false) {
+            gameState.isGameOver = true;
+            gameState.isPaused = true;
+            gameState.lastScore = gameState.score;
+            
+            // Guardar puntuación alta (asíncrono)
+            if (window.saveHighScore) {
+                window.saveHighScore(gameState.score);
+            }
+
+            const title = invaded ? "¡INVASIÓN!" : "GAME OVER";
+            const message = invaded ? 
+                `Los invasores llegaron a la Tierra. Puntuación: ${gameState.score}` : 
+                `Has perdido todas tus vidas. Puntuación: ${gameState.score}`;
+
+            showModal(title, message, true, true);
+        }
+        
+        // Manejar la victoria del juego
+        function gameWin() {
+            gameState.isGameWon = true;
+            gameState.isPaused = true;
+            gameState.lastScore = gameState.score;
+
+            // Guardar puntuación alta (asíncrono)
+            if (window.saveHighScore) {
+                window.saveHighScore(gameState.score);
+            }
+
+            // Muestra "WINNER" y regresa al menú de inicio
+            const title = "¡GANASTE!";
+            const message = `¡Has derrotado al jefe final y salvado la galaxia! Puntuación final: ${gameState.score}`;
+
+            showModal(title, message, true, true); // true para que regrese al menú
+        }
+
+        // Pausar el juego
+        function pauseGame() {
+            gameState.isPaused = true;
+            showModal("PAUSA", "Juego pausado. Presiona CONTINUAR o 'P'", false);
+        }
+
+        // Reanudar el juego
+        function unpauseGame() {
+            if (gameState.isGameOver || gameState.isGameWon) return;
+            gameState.isPaused = false;
+            hideModal();
+            gameLoop();
+        }
+        
+        // Comprobar y otorgar premios
+        function checkAndAwardPrizes(level, difficultyName) {
+            Object.values(REWARDS).forEach(reward => {
+                if (reward.condition(level, difficultyName) && !gameState.prizes.has(reward.id)) {
+                    gameState.prizes.add(reward.id);
+                    console.log(`¡Premio desbloqueado: ${reward.name}!`);
+                    // Podríamos mostrar una notificación en pantalla aquí si fuera necesario
+                }
+            });
+        }
+
+        // Siguiente Nivel / Comprobación de Victoria
+        function nextLevel() {
+            // Otorgar premio por el nivel recién completado
+            checkAndAwardPrizes(gameState.level, gameState.currentDifficultyName);
+            
+            // ** Lógica de Victoria: Si el nivel actual es el máximo, el jugador gana **
+            if (gameState.level >= MAX_LEVEL) {
+                gameWin();
+                return;
+            }
+
+            gameState.level++;
+            gameState.isLevelComplete = true;
+            playerBullets = []; // Limpiar proyectiles del jugador
+            enemyBullets = []; // Limpiar proyectiles del enemigo
+            
+            // Mostrar modal de nivel completado antes de iniciar el siguiente
+            modalTitle.textContent = `¡NIVEL ${gameState.level - 1} COMPLETADO!`;
+            modalMessage.textContent = `Puntuación: ${gameState.score}. Prepárate para el Nivel ${gameState.level}.`;
+            
+            // Configurar el botón para continuar con el nuevo nivel
+            difficultySelection.classList.add('hidden');
+            pauseContinueButton.classList.remove('hidden');
+            startButton.textContent = "CONTINUAR";
+            startButton.onclick = () => {
+                hideModal();
+                gameState.isLevelComplete = false;
+                initializeEnemies(gameState.level);
+                updateGameUI();
+                gameLoop(); // Reanudar el loop
+            };
+            modal.classList.remove('hidden');
+            cancelAnimationFrame(animationFrameId); // Pausa el loop
+        }
+
+        // Función de actualización y dibujo principal
+        function update() {
+            if (gameState.isPaused || gameState.isGameOver || gameState.isLevelComplete || gameState.isGameWon) return;
+
+            // 1. Limpiar el canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 2. Mover y dibujar al jugador
+            player.move();
+            player.draw();
+            
+            // ** CAMBIO CLAVE: Disparo automático **
+            player.shoot();
+
+            // 3. Mover la formación de enemigos
+            moveEnemies();
+
+            // 4. Actualizar y dibujar enemigos y sus disparos
+            const aliveEnemies = enemies.filter(enemy => enemy.y + enemy.height < canvas.height - 20); 
+            
+            aliveEnemies.forEach(enemy => {
+                enemy.draw();
+                enemy.tryShoot(); 
+            });
+            
+            enemies = aliveEnemies;
+
+            // 5. Actualizar y dibujar proyectiles del jugador
+            playerBullets.forEach((bullet, bIndex) => {
+                bullet.update();
+                bullet.draw();
+
+                // Colisión bala de jugador - enemigo
+                enemies.forEach((enemy, eIndex) => {
+                    if (checkCollision(bullet, enemy)) {
+                        explosions.push(new Explosion(enemy.x + enemy.width / 2, enemy.y + enemy.height / 2, enemy.color));
+                        gameState.score += enemy.value;
+                        playerBullets.splice(bIndex, 1); // Eliminar bala
+                        enemies.splice(eIndex, 1); // Eliminar enemigo
+                        updateGameUI();
+                        
+                        // ** CAMBIO CLAVE: Posibilidad de cambiar de arma al destruir enemigo **
+                        changeWeapon(); 
+                    }
+                });
+            });
+
+            // 6. Actualizar y dibujar proyectiles del enemigo
+            enemyBullets.forEach((bullet, bIndex) => {
+                bullet.update();
+                bullet.draw();
+
+                // Colisión bala de enemigo - jugador
+                if (checkCollision(bullet, player)) {
+                    explosions.push(new Explosion(player.x + player.width / 2, player.y + player.height / 2, player.color));
+                    gameState.lives--;
+                    enemyBullets.splice(bIndex, 1); // Eliminar bala
+                    updateGameUI();
+                    
+                    // Si se acaban las vidas
+                    if (gameState.lives <= 0) {
+                        gameOver();
+                    }
+                }
+            });
+
+            // Limpiar proyectiles fuera de pantalla
+            playerBullets = playerBullets.filter(b => b.y > 0);
+            enemyBullets = enemyBullets.filter(b => b.y < canvas.height);
+            
+            // 7. Actualizar y dibujar explosiones
+            explosions.forEach((exp, expIndex) => {
+                exp.update();
+                exp.draw();
+            });
+            explosions = explosions.filter(exp => exp.life < exp.maxLife);
+
+            // 8. Condición de victoria de nivel
+            if (enemies.length === 0 && !gameState.isLevelComplete) {
+                nextLevel();
+            }
+        }
+
+        // Loop principal del juego (requestAnimationFrame)
+        function gameLoop() {
+            if (!gameState.isPaused && !gameState.isGameOver && !gameState.isGameWon) {
+                update();
+                animationFrameId = requestAnimationFrame(gameLoop);
+            }
+        }
+
+        // =========================================================================
+        // Manejo de Eventos (Teclado y Móvil)
+        // =========================================================================
+        
+        // Manejar el redimensionamiento del canvas para que sea responsive
+        function resizeCanvas() {
+            // Mantiene una proporción 4:3 pero se ajusta al tamaño del contenedor
+            const container = canvas.parentElement;
+            const containerWidth = container.clientWidth;
+            const containerHeight = container.clientHeight;
+
+            let newWidth, newHeight;
+            const ratio = 4 / 3;
+
+            if (containerWidth / containerHeight > ratio) {
+                newHeight = containerHeight;
+                newWidth = containerHeight * ratio;
+            } else {
+                newWidth = containerWidth;
+                newHeight = containerWidth / ratio;
+            }
+            
+            // Limitar el tamaño máximo a 800x600 (tamaño original de diseño)
+            const maxWidth = 800;
+            const maxHeight = 600;
+            
+            if (newWidth > maxWidth) newWidth = maxWidth;
+            if (newHeight > maxHeight) newHeight = maxHeight;
+
+            canvas.width = newWidth;
+            canvas.height = newHeight;
+
+            // Recalcular la posición del jugador si el tamaño cambia mucho
+            if (player) {
+                player.x = (canvas.width / 2) - (player.width / 2);
+                player.y = canvas.height - 40;
+            }
+        }
+        
+        // Listener de redimensionamiento
+        window.addEventListener('resize', resizeCanvas);
+        
+        // Listeners de teclado
+        window.addEventListener('keydown', (e) => {
+            const key = e.key;
+            keys[key] = true;
+
+            // Eliminamos la lógica de disparo manual con ' ' o 'Spacebar'
+
+            if (key === 'p' || key === 'P') {
+                if (gameState.isPaused && !gameState.isGameOver && !gameState.isGameWon) {
+                    unpauseGame();
+                } else if (!gameState.isPaused && !gameState.isGameOver && !gameState.isGameWon) {
+                    pauseGame();
+                }
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            keys[e.key] = false;
+        });
+
+        // Controles táctiles/móviles
+        document.getElementById('move-left').addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            keys['ArrowLeft'] = true;
+        });
+        document.getElementById('move-left').addEventListener('touchend', (e) => {
+            keys['ArrowLeft'] = false;
+        });
+        document.getElementById('move-right').addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            keys['ArrowRight'] = true;
+        });
+        document.getElementById('move-right').addEventListener('touchend', (e) => {
+            keys['ArrowRight'] = false;
+        });
+        // Se elimina el listener del botón de disparo
+        
+        // Asignar eventos a los botones de dificultad
+        easyButton.onclick = () => selectDifficulty(DIFFICULTIES.EASY);
+        mediumButton.onclick = () => selectDifficulty(DIFFICULTIES.MEDIUM);
+        hardButton.onclick = () => selectDifficulty(DIFFICULTIES.HARD);
+
+
+        // =========================================================================
+        // Inicialización
+        // =========================================================================
+        
+        // Inicializar el tamaño del canvas y el estado del juego al cargar
+        window.onload = function() {
+            resizeCanvas();
+            // Inicializamos el jugador para que se dibuje en el centro
+            player = new Player(); 
+            // Mostramos el menú de inicio para la selección de dificultad
+            showMenu();
+            updateGameUI(); 
+        };
+    </script>
+</body>
+</html>
